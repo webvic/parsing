@@ -3,18 +3,36 @@ from bs4 import BeautifulSoup
 import pandas as pd
 import re
 from datetime import datetime
+from urllib.parse import urljoin
+import time
 
 # URL первой страницы
-BASE_URL = "https://www.cian.ru/cat.php?deal_type=sale&district[0]=107&engine_version=2&offer_type=flat&room4=1&room5=1"
+DOMAIN = "https://www.cian.ru/"
+
+def get_full_url(base_url, link):
+    return urljoin(base_url, link)
 
 # Функция для получения HTML содержимого страницы
 def get_html(url):
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
-    response = requests.get(url, headers=headers)
-    response.raise_for_status()
-    return response.text
+    trys = 0
+    while trys < 10:
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            return response.text
+        elif response.status_code == 429:
+            print('Отказ. Ждем 2 сек ')
+            time.sleep(2)           
+            trys += 1
+            continue
+        else:
+            print(f"Ошибка при получении страницы: {response.status_code}")
+            return None   
+    else:
+        print('Не удалось получить код')
+        return None   
 
 def parse_geo(geo_block):
     try:
@@ -22,27 +40,14 @@ def parse_geo(geo_block):
         geo_links = geo_block.find_all("a", {"data-name": "GeoLabel"})
         
         # Извлекаем значения
-        city = geo_links[0].text.strip() if len(geo_links) > 0 else None
-        area = geo_links[1].text.strip() if len(geo_links) > 1 else None
-        district = geo_links[2].text.strip() if len(geo_links) > 2 else None
-        metro = geo_links[3].text.strip() if len(geo_links) > 3 else None
-        street = geo_links[4].text.strip() if len(geo_links) > 4 else None
-        house = geo_links[5].text.strip() if len(geo_links) > 5 else None
+        # Объединение текста из каждого <a> тега в строку
+        address = ", ".join(tag.text.strip() for tag in geo_links)
 
     except Exception as e:
         print(f"Ошибка при парсинге геоданных: {e}")
-        city, district, metro, street, house = None, None, None, None, None
+        address = None
 
-    # Возвращаем результат в виде словаря
-    geo = {
-        "Город": city,
-        "Округ": area,
-        "Район": district,
-        "Метро": metro,
-        "Улица": street,
-        "Дом": house,
-    }
-    return geo
+    return address  
 
 def parse_card(card):
     data = {}
@@ -55,11 +60,22 @@ def parse_card(card):
     img_tag = card.find('img', class_="_93444fe79c--container--KIwW4")
     data['image_url'] = img_tag['src'] if img_tag else None
 
-    # Геокомпоненты
+    # Адрес
     geo_block = card.find('div', class_="_93444fe79c--labels--L8WyJ")
-    geo_data = parse_geo(geo_block)
+    address = parse_geo(geo_block)
+
+    # Извлекаем ЖК
+    jk_tag = card.find('a', class_="_93444fe79c--jk--dIktL")
+    if jk_tag:
+        data['В ЖК'] = jk_tag.text.strip()
     
-    data.update(geo_data)
+    data['Адрес'] = address
+
+    # Удаленность от метро
+    # <div class="_93444fe79c--remoteness--q8IXp">9 минут пешком</div>
+    link_tag = card.find('div', class_="_93444fe79c--remoteness--q8IXp")
+    remoutness = link_tag.get_text(strip=True)
+    data['От метро'] = 'Пешком' if 'пешком' in remoutness.lower() else 'Транспортом'
 
     # Цена
     # Находим блок с ценой
@@ -70,7 +86,7 @@ def parse_card(card):
         price_text = price_tag.get_text(strip=True)
         # Убираем пробелы и символы валюты, оставляем только цифры
         price = int(re.sub(r"[^\d]", "", price_text))
-        print(f"Цена: {price}")
+        # print(f"Цена: {price}")
     else:
         print("Цена не найдена")
 
@@ -84,7 +100,7 @@ def parse_card(card):
         price_per_sqm_text = price_per_sqm_tag.get_text(strip=True)
         # Убираем пробелы и символы валюты, оставляем только цифры
         price_per_sqm = int(re.sub(r"[^\d]", "", price_per_sqm_text))
-        print(f"Цена за м²: {price_per_sqm}")
+        # print(f"Цена за м²: {price_per_sqm}")
     else:
         print("Цена за м² не найдена")   
 
@@ -109,17 +125,12 @@ def parse_card(card):
             floor = int(match.group("floor"))
             total_floors = int(match.group("total_floors"))
 
-        # Вывод результатов
-        print(f"Количество комнат: {rooms}")
-        print(f"Этаж: {floor}")
-        print(f"Этажность: {total_floors}")
+            data['Комнат']=rooms
+            data['Этаж']=floor
+            data['Этажность']=total_floors
+            data['Площадь']=area
     else:
         print("Информация об объекте не найдена")    
-
-    data['Комнат']=rooms
-    data['Этаж']=floor
-    data['Этажность']=total_floors
-    data['Площадь']=area
 
     # Описание
     description_tag = card.find('div', class_="_93444fe79c--description--SqTNp")
@@ -128,8 +139,8 @@ def parse_card(card):
     return data
 
 # Функция для извлечения данных с одной страницы
-def parse_page(html):
-    soup = BeautifulSoup(html, "html.parser")
+def parse_page(soup):
+
     results_block= soup.find('div', class_="_93444fe79c--wrapper--W0WqH")
 
     # Находим список всех article с data-name="CardComponent"
@@ -154,43 +165,157 @@ def parse_all_pages(base_url):
     while url:
         print(f"Обрабатываем страницу: {url}")
         html = get_html(url)
-        data = parse_page(html)
+        if html:
+            soup = BeautifulSoup(html, "html.parser")
+        else:
+            print (f'Парсинг прерван сервером. Возвращаем {len(all_data)} квартир, которые успели скачать')
+            break
+        
+        # Парсинг данных текущей страницы
+        data = parse_page(soup)  # Предполагается, что parse_page определён ранее
         all_data.extend(data)
 
-        # Переход на следующую страницу
-        soup = BeautifulSoup(html, "html.parser")
-        next_page = soup.find("a", class_="c6e8ba5398--button--2xPMX")
-        url = next_page["href"] if next_page else None
+        next_button = soup.find("a", {"class": "_93444fe79c--button--KVooB"}, string="Дальше")
+        if next_button:
+            url = next_button["href"]  # Переход на следующую страницу
+            url = get_full_url(DOMAIN, url)
+            time.sleep(1)
+        else:
+            url = None  # Конец пагинации
+
     return all_data
 
-# Сбор данных
-data = parse_all_pages(BASE_URL)
+# URL справочника метро
+metro_url = "https://www.cian.ru/metros-moscow.xml"
 
-# Создание DataFrame
-df = pd.DataFrame(data)
+# Функция для получения словаря метро
+def get_metro_dict(url=metro_url):
+    # Скачиваем XML-файл
+    response = requests.get(url)
+    response.raise_for_status()  # Проверка на успешность запроса
 
-# Сохранение в CSV
-output_file = f"cian_flats_{datetime.now().strftime('%Y%m%d')}.csv"
-df.to_csv(output_file, index=False, encoding="utf-8-sig")
-print(f"Данные сохранены в файл: {output_file}")
+    # Парсинг XML
+    soup = BeautifulSoup(response.content, "xml")
+    metro_dict = {}
+    
+    # Извлекаем данные о станциях
+    for location in soup.find_all("location"):
+        metro_id = int(location["id"])
+        metro_name = location.text.strip()
+        metro_dict[metro_id] = metro_name
+    
+    return metro_dict
 
-average_price = df["Цена, ₽"].mean()
-average_price_per_sqm = df["Цена за м², ₽"].mean()
-average_area = df["Площадь"].mean()
+def get_user_input_with_search(metro_codes):
+    print("Введите количество комнат (например, 1, 2, 3):")
+    rooms = input().strip()
+    
+    # Поиск станции метро
+    while True:
+        print("\nВведите часть названия станции метро:")
+        search_query = input().strip().lower()
+        
+        # Поиск подходящих станций
+        matches = [
+            (code, name) for code, name in metro_codes.items()
+            if search_query in name.lower()
+        ]
+        
+        if not matches:
+            print("Станции не найдены. Попробуйте ещё раз.")
+            continue
+        
+        # Показ результатов поиска
+        print("\nНайдены станции:")
+        for i, (code, name) in enumerate(matches, start=1):
+            print(f"{i}. {name} (код: {code})")
+        
+        if len(matches) == 1:
+            metro_code, metro_name = matches[0]
+            break
+        else:
+            print("\nВведите номер станции:")
+            try:
+                station_index = int(input().strip()) - 1
+                if 0 <= station_index < len(matches):
+                    metro_code, metro_name = matches[station_index]
+                    break
+                else:
+                    print("Неверный номер. Попробуйте ещё раз.")
+            except ValueError:
+                print("Ошибка ввода. Попробуйте ещё раз.")
+    
+    # Убедитесь, что return имеет правильный отступ
+    return rooms, metro_name, metro_code
 
-# Добавление строки ИТОГО
-df.loc['ИТОГО'] = {
-    'Комнат': '—',
-    'Улица': '—',
-    'Дом': '—',
-    'Площадь': average_area,
-    'Цена, ₽': average_price,
-    'Цена за м², ₽': average_price_per_sqm,
-    'Этаж': '—',
-    'Этажность': '—',
-    'description': 'Средние значения'
-}
 
-# Вывод DataFrame с итогами
-print(df[['Комнат','Улица','Дом', 'Площадь','Цена, ₽', 'Цена за м², ₽', 'Этаж', 'Этажность','description']])
+# Формирование URL
+def generate_url(rooms, metro_code):
+    base_url = "https://www.cian.ru/cat.php"
+    query_params = (
+        f"deal_type=sale&engine_version=2&offer_type=flat&"
+        f"metro%5B0%5D={metro_code}&room{rooms}=1"
+    )
+    return f"{base_url}?{query_params}"
 
+if __name__ == "__main__":
+    metro_codes = get_metro_dict()
+    rooms, metro_name, metro_code = get_user_input_with_search(metro_codes)
+    final_url = generate_url(rooms, metro_code)
+    
+    print("\nВы выбрали:")
+    print(f"Количество комнат: {rooms}")
+    print(f"Станция метро: {metro_name} (код: {metro_code})")
+    print(f"Сформированный URL: {final_url}")
+
+    # Сбор данных
+    data = parse_all_pages(final_url)
+
+    # Создание DataFrame
+    df_all = pd.DataFrame(data)
+
+    df_all['Количество'] = None  # Создаем столбец с пустыми значениями
+    if "В ЖК" not in df_all.columns:
+        df_all['В ЖК'] = None
+
+    df_foot = df_all[df_all['От метро'] == 'Пешком']
+    df_transp = df_all[df_all['От метро'] == 'Транспортом']
+    df_jk = df_all[df_all['В ЖК'].notna()]
+    df_second = df_all[df_all['В ЖК'].isna()]
+
+    dfs = [df_all, df_foot, df_transp,df_jk,df_second]
+    totals = ['СРЕДНЕЕ', 'Пешком', 'Транспортом', 'В ЖК', 'Вторичка']
+
+    for df, total in zip(dfs, totals):
+
+        average_price = df["Цена, ₽"].mean()
+        average_price_per_sqm = df["Цена за м², ₽"].mean()
+        average_area = df["Площадь"].mean()
+        amount = len(df)
+
+        # Добавление строк с итогами
+        df_all.loc[total] = {
+            'Количество': amount,
+            'Комнат': '—',
+            'Улица': '—',
+            'Дом': '—',
+            'Площадь': average_area,
+            'Цена, ₽': average_price,
+            'Цена за м², ₽': average_price_per_sqm,
+            'Этаж': '—',
+            'Этажность': '—',
+            'description': 'Средние значения'
+        }
+    # Создание форматированных колонок
+    df_all['Площадь, м²'] = df_all['Площадь'].apply(lambda x: f"{x:.1f}")
+    df_all['Цена, млн. ₽'] = df_all['Цена, ₽'].apply(lambda x: f"{x / 1_000_000:.1f}")
+    df_all['Цена за м², тыс. ₽'] = df_all['Цена за м², ₽'].apply(lambda x: f"{x / 1_000:.1f}")
+
+    # Вывод DataFrame с итогами
+    print(df_all[['В ЖК', 'Площадь, м²','Цена, млн. ₽', 'Цена за м², тыс. ₽', 'description']])
+    print(df_all.iloc[-5:][['Количество','Площадь, м²','Цена, млн. ₽', 'Цена за м², тыс. ₽']])
+
+    # Сохранение в CSV
+    output_file = f"cian_flats_{metro_name}_{rooms}_{datetime.now().strftime('%Y%m%d')}.csv"
+    df_all.to_csv(output_file, index=False, encoding="utf-8-sig")
+    print(f"Данные сохранены в файл: {output_file}")
