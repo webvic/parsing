@@ -258,11 +258,9 @@ def generate_url(rooms, metro_code):
     )
     return f"{base_url}?{query_params}"
 
-if __name__ == "__main__":
-    metro_codes = get_metro_dict()
-    rooms, metro_name, metro_code = get_user_input_with_search(metro_codes)
+def parsing_site(rooms,metro_name,metro_code):    
     final_url = generate_url(rooms, metro_code)
-    
+
     print("\nВы выбрали:")
     print(f"Количество комнат: {rooms}")
     print(f"Станция метро: {metro_name} (код: {metro_code})")
@@ -284,7 +282,7 @@ if __name__ == "__main__":
     df_second = df_all[df_all['В ЖК'].isna()]
 
     dfs = [df_all, df_foot, df_transp,df_jk,df_second]
-    totals = ['СРЕДНЕЕ', 'Пешком', 'Транспортом', 'В ЖК', 'Вторичка']
+    totals = ['СРЕДН.', 'Пешком', 'Трансп.', 'В ЖК', 'Втор.']
 
     for df, total in zip(dfs, totals):
 
@@ -313,9 +311,27 @@ if __name__ == "__main__":
 
     # Вывод DataFrame с итогами
     print(df_all[['В ЖК', 'Площадь, м²','Цена, млн. ₽', 'Цена за м², тыс. ₽', 'description']])
-    print(df_all.iloc[-5:][['Количество','Площадь, м²','Цена, млн. ₽', 'Цена за м², тыс. ₽']])
+    df_resume = df_all.iloc[-5:][['Количество','Площадь, м²','Цена, млн. ₽', 'Цена за м², тыс. ₽']]
+    df_resume = df_resume.rename(columns={
+        "Площадь, м²": "S, м²",
+        "Цена, млн. ₽": "M₽",
+        "Цена за м², тыс. ₽": "K₽/м²",
+        "Количество": "N"
+    })
+    print(df_resume)
 
     # Сохранение в CSV
     output_file = f"cian_flats_{metro_name}_{rooms}_{datetime.now().strftime('%Y%m%d')}.csv"
     df_all.to_csv(output_file, index=False, encoding="utf-8-sig")
     print(f"Данные сохранены в файл: {output_file}")
+
+    return df_resume
+
+
+if __name__ == "__main__":
+    metro_codes = get_metro_dict()
+    rooms, metro_name, metro_code = get_user_input_with_search(metro_codes)
+
+    parsing_site(rooms,metro_name,metro_code)
+
+    
