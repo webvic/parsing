@@ -1,4 +1,5 @@
 import logging
+import os
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -7,9 +8,13 @@ from telegram.ext import (
     filters,
     ContextTypes,
     ConversationHandler,
+    CallbackQueryHandler
 )
 from parsing import get_metro_dict, parsing_site
 from tabulate import tabulate
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from dotenv import load_dotenv
+
 
 # Настройка логгирования
 logging.basicConfig(
@@ -18,66 +23,62 @@ logging.basicConfig(
 )
 
 # Шаги для ConversationHandler
-ENTERING_ROOMS, ENTERING_METRO, CHOOSING_METRO = range(3)
+ENTERING_ROOMS, ENTERING_METRO, CHOOSING_METRO, POST_RESULTS = range(4)
 
-# Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Добро пожаловать! Сколько комнат вас интересует? (Например, 1, 2, 3):")
+    """
+    Приветствует пользователя и предлагает выбрать количество комнат с помощью кнопок.
+    """
+    await choose_rooms_buttons(update, context)
     return ENTERING_ROOMS
 
-# Обработка выбора количества комнат
-async def choose_rooms(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_input = update.message.text.strip()
 
-    # Проверка, что пользователь ввел корректное число
-    if user_input.isdigit() and 1 <= int(user_input) <= 5:
-        context.user_data["rooms"] = user_input
-        await update.message.reply_text(f"Вы выбрали {user_input}-комнатную квартиру. Теперь введите часть названия станции метро:")
-        return ENTERING_METRO
-    else:
-        await update.message.reply_text("Пожалуйста, введите корректное количество комнат (например, 1, 2, 3).")
-        return ENTERING_ROOMS
+# Обработка выбора количества комнат
+async def choose_rooms_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Показывает кнопки для выбора количества комнат.
+    """
+    keyboard = [
+        [InlineKeyboardButton(str(i), callback_data=f"choose_rooms:{i}") for i in range(1, 6)]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await send_message(update, "Сколько комнат вас интересует?", reply_markup=reply_markup)
+    return ENTERING_ROOMS
 
 # Поиск станции метро
 async def search_metro(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text.strip().lower()
 
-    # Формируем сообщение только если длина ввода >= 3 символов
     if len(user_input) < 3:
         await update.message.reply_text("Введите хотя бы 3 буквы для поиска станции метро.")
-        return ENTERING_METRO  # Возвращаемся на текущий шаг диалога
+        return ENTERING_METRO
 
-    # Поиск совпадений в справочнике
     matches = [
         (code, name)
         for code, name in metro_codes.items()
         if user_input in name.lower()
     ]
 
-    # Если совпадений нет
     if not matches:
         await update.message.reply_text("Станции не найдены. Попробуйте ввести другую часть названия.")
         return ENTERING_METRO
 
-    # Если найдены совпадения
-    response = "Найдены следующие станции метро:\n"
-    for i, (code, name) in enumerate(matches, start=1):
-        response += f"{i}. {name} (код: {code})\n"
-
-    response += "\nВведите номер станции, чтобы выбрать её:"
-    await update.message.reply_text(response)
-
-    # Сохраняем список найденных станций в context.user_data
     context.user_data["metro_matches"] = matches
 
+    # Переход на кнопки выбора станций
+    await choose_metro_buttons(update, context)
     return CHOOSING_METRO
 
 async def process_parsing(update: Update, context: ContextTypes.DEFAULT_TYPE, metro_code, metro_name):
     """Общий функционал для обработки выбранной станции метро."""
     rooms = context.user_data.get("rooms")
+    query = update.callback_query
 
     # Уведомление пользователя
-    await update.message.reply_text(f"Ищем {rooms}-комнатные квартиры у метро {metro_name}...")
+    if query:
+        await query.message.reply_text(f"Ищем {rooms}-комнатные квартиры у метро {metro_name}...")
+    else:
+        await update.message.reply_text(f"Ищем {rooms}-комнатные квартиры у метро {metro_name}...")
 
     # Парсинг сайта
     df = parsing_site(rooms, metro_name, metro_code)
@@ -86,88 +87,189 @@ async def process_parsing(update: Update, context: ContextTypes.DEFAULT_TYPE, me
     await send_results_as_table(update, context, df)
 
 
-async def choose_metro(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+MAX_BUTTON_NUM = 6
+
+async def choose_metro_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
+        # Получаем список станций из пользовательских данных
         matches = context.user_data.get("metro_matches", [])
+        
+        if not matches:  # Если список пуст
+            await send_message(update, "Не удалось найти станции метро. Попробуйте снова.")
+            return ENTERING_METRO
 
-        # Если найдено только одно совпадение
-        if len(matches) == 1:
-            metro_code, metro_name = matches[0]
-            await update.message.reply_text(
-                f"Выбрана станция: {metro_name}"
-            )
-            # Переходим сразу к парсингу
-            await process_parsing(update, context, metro_code, metro_name)
-            return ConversationHandler.END
+        # Инициализация сообщения о превышении количества кнопок
+        message = "Выберите станцию метро:"
+        if len(matches) > MAX_BUTTON_NUM:
+            message += '\n☝ Показаны не все результаты. Уточните поиск, если нужно.'
 
-        # Если станций больше одной, ожидаем выбор
-        try:
-            station_index = int(update.message.text.strip()) - 1
+        buttons = [
+            [InlineKeyboardButton(name[:24], callback_data=f"choose_metro:{code}:{name[:24]}")]
+            for code, name in matches[:MAX_BUTTON_NUM]
+        ]
+        buttons.append([InlineKeyboardButton("🔄 Уточнить поиск", callback_data="repeat_search")])
 
-            if 0 <= station_index < len(matches):
-                metro_code, metro_name = matches[station_index]
-                await process_parsing(update, context, metro_code, metro_name)
-            else:
-                await update.message.reply_text("Неверный номер станции. Попробуйте снова.")
-                return CHOOSING_METRO
-        except ValueError:
-            await update.message.reply_text("Ошибка ввода. Пожалуйста, введите номер станции.")
-            return CHOOSING_METRO
+
+        # Создаём клавиатуру
+        reply_markup = InlineKeyboardMarkup(buttons)
+
+        # отладка
+        logging.info(f"Кнопки для отправки: {buttons}")
+        reply_markup = InlineKeyboardMarkup(buttons)
+
+        # Отправка сообщения с кнопками напрямую
+        await update.message.reply_text(
+            text=message,  # Текст сообщения
+            reply_markup=reply_markup  # Клавиатура с кнопками
+        )
+
+        return CHOOSING_METRO
+
     except Exception as e:
-        await update.message.reply_text(f"Произошла ошибка: {e}")
-        return ConversationHandler.END
+        logging.error(f"Ошибка в choose_metro_buttons: {e}")
+        await send_message(update, "Произошла ошибка. Попробуйте снова.")
+        return ENTERING_METRO
 
-    return ConversationHandler.END
+
+async def metro_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data
+
+    if data == "repeat_search":
+        await query.edit_message_text("Введите часть названия станции метро для нового поиска:")
+        return ENTERING_METRO
+
+    if data.startswith("choose_metro:"):
+        _, metro_code, metro_name = data.split(":")
+        await process_parsing(update, context, metro_code, metro_name)
+        return POST_RESULTS  # Возвращаем состояние для обработки кнопок
+
+
+        
 
 # Отмена
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Диалог отменён. Напишите /start, чтобы начать снова.")
     return ConversationHandler.END
 
+async def send_message(update: Update, text: str, **kwargs):
+    """
+    Универсальная функция отправки сообщения.
+    """
+    if update.callback_query:
+        await update.callback_query.message.reply_text(text, **kwargs)
+    else:
+        await update.message.reply_text(text, **kwargs)
 
-async def send_results_as_table(update, context, df):
+
+async def send_results_as_table(update: Update, context: ContextTypes.DEFAULT_TYPE, df):
     """
     Форматирует DataFrame как таблицу и отправляет пользователю.
     """
     if df.empty:
-        await update.message.reply_text("К сожалению, ничего не найдено для вашего запроса.")
-        return
+        await send_message(update, "К сожалению, ничего не найдено для вашего запроса.")
+        return POST_RESULTS  # Возвращаем состояние для обработки кнопок
 
-    # Оставляем только нужные колонки для отображения
-    columns_to_show = ['N', 'S, м²', 'M₽', 'K₽/м²']
-    df_for_display = df.loc[["СРЕДН.", "Пешком", "Трансп.", "В ЖК", "Втор."], columns_to_show]
+    # Формирование таблицы
+    table = tabulate(df, headers='keys', tablefmt='grid', showindex=True)
+    await send_message(update, f"Результаты:\n\n```\n{table}\n```", parse_mode="Markdown")
 
-    # Преобразование в текстовую таблицу
-    table_text = df_for_display.to_markdown(tablefmt="grid")
+    # Добавление кнопок для выбора действия
+    keyboard = [
+        [InlineKeyboardButton("Новый поиск", callback_data="new_search")],
+        [InlineKeyboardButton("Закончить", callback_data="end_conversation")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await send_message(update, "Что вы хотите сделать дальше?", reply_markup=reply_markup)
 
-    # Отправка таблицы
-    await update.message.reply_text(f"```\n{table_text}\n```", parse_mode="Markdown")
+    return POST_RESULTS  # Возвращаем состояние для обработки кнопок
 
 
-TOKEN = '7658930193:AAEyx9h-97BuQiDJAbNYBP6ItoOu54tKfHo'
+async def handle_post_results_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    action = query.data
 
-# Главная функция
+    logging.info(f"Получены данные кнопки: {action}")
+
+    if action == "new_search":
+        # Редактируем сообщение для перехода на новый поиск
+        await query.message.edit_text("Начинаем новый поиск. Сколько комнат вы хотите?")
+        # Показываем кнопки выбора количества комнат
+        await choose_rooms_buttons(update, context)
+        return ENTERING_ROOMS
+
+    if action == "end_conversation":
+        # Завершаем диалог
+        await query.message.edit_text("Спасибо за использование бота! До свидания!")
+        return ConversationHandler.END
+
+
+
+
+
+async def room_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Обрабатывает выбор количества комнат через кнопки.
+    """
+    query = update.callback_query
+    data = query.data
+
+    if data.startswith("choose_rooms:"):
+        rooms = data.split(":")[1]
+        context.user_data["rooms"] = rooms
+        await query.edit_message_text(f"Вы выбрали {rooms}-комнатную квартиру. Теперь введите часть названия станции метро:")
+        return ENTERING_METRO
+
+async def show_start_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("Начать поиск", callback_data="start_search")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Нажмите кнопку ниже, чтобы начать:", reply_markup=reply_markup)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Приветствует пользователя и предлагает выбрать количество комнат с помощью кнопок.
+    """
+    await choose_rooms_buttons(update, context)  # Показываем кнопки для выбора
+    return ENTERING_ROOMS
+
+
+# Загрузка переменных из .env
+load_dotenv()
+
+# Получение токена из переменных окружения
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
+if not TOKEN:
+    raise ValueError("Токен Telegram бота не найден в переменных окружения!")
+
 def main():
-
     # Создание приложения Telegram
     application = Application.builder().token(TOKEN).build()
 
-    # Настройка ConversationHandler
+    # ConversationHandler для обработки диалогов
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            ENTERING_ROOMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_rooms)],
+            ENTERING_ROOMS: [CallbackQueryHandler(room_button_handler)],
             ENTERING_METRO: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_metro)],
-            CHOOSING_METRO: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_metro)],
+            CHOOSING_METRO: [CallbackQueryHandler(metro_button_handler)],
+            POST_RESULTS: [CallbackQueryHandler(handle_post_results_buttons, pattern="^(new_search|end_conversation)$")],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
-    # Регистрация обработчиков
+    # Добавление ConversationHandler в приложение
     application.add_handler(conv_handler)
+
+    # Обработчик для кнопки "Начать новый поиск" вне контекста текущего диалога
+    application.add_handler(CallbackQueryHandler(start, pattern="start_search"))
 
     # Запуск бота
     application.run_polling()
+
 
 if __name__ == "__main__":
     metro_codes = get_metro_dict()
